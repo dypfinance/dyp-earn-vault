@@ -1,7 +1,7 @@
 # dyp-earn-vault
 DYP Vaults with support for the following deposit tokens: ETH, WBTC, USDC, USDT, DAI
 
-##DYP Vaults Specification:
+## DYP Vaults Specification:
 
 1. Support for the following deposit tokens: ETH, WBTC, USDC, USDT, DAI
 
