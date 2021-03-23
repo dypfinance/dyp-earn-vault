@@ -1,7 +1,5 @@
 # DYP Earn Vault
 
-## DYP Vaults Specification:
-
 1. Support for the following deposit tokens: ETH, WBTC, USDC, USDT, DAI
 
 2. https://compound.finance/developers Compound Integration - users deposited funds are forwarded to compound for respective cTokens held by smart contract.
