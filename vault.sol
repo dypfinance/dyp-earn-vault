@@ -860,13 +860,11 @@ contract Vault is Ownable, ReentrancyGuard {
     uint public constant FEE_PERCENT_TO_BUYBACK_X_100 = 2500;
     
     uint public constant REWARD_INTERVAL = 365 days;
+    uint public constant ADMIN_CAN_CLAIM_AFTER = 395 days;
     uint public constant REWARD_RETURN_PERCENT_X_100 = 200;
     
     // ETH fee equivalent predefined gas price
     uint public constant MIN_ETH_FEE_IN_WEI = 400000 * 1 * 10**9;
-    
-    // slippage tolerance to use while doing uniswap transactions
-    uint public constant SLIPPAGE_TOLERANCE_X_100 = 300;
     
     address public constant TRUSTED_DEPOSIT_TOKEN_ADDRESS = 0x07de306FF27a2B630B1141956844eB1552B956B5;
     address public constant TRUSTED_CTOKEN_ADDRESS = 0x3f0A0EA2f86baE6362CF9799B523BA06647Da018;
@@ -886,7 +884,7 @@ contract Vault is Ownable, ReentrancyGuard {
     IUniswapV2Router public constant uniswapRouterV2 = IUniswapV2Router(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
     
     modifier noContractsAllowed() {
-        require(!(address(msg.sender).isContract()) && tx.origin == msg.sender, "No Contracts Allowed!");
+        require(tx.origin == msg.sender, "No Contracts Allowed!");
         _;
     }
     
@@ -1121,7 +1119,7 @@ contract Vault is Ownable, ReentrancyGuard {
         
         emit CompoundRewardClaimed(msg.sender, depositTokenReceived);
     }
-    function _claimPlatformTokenDivs() private {
+    function _claimPlatformTokenDivs(uint _amountOutMin_platformTokens) private {
         updateAccount(msg.sender);
         uint amount = platformTokenDivsBalance[msg.sender];
         platformTokenDivsBalance[msg.sender] = 0;
@@ -1133,6 +1131,7 @@ contract Vault is Ownable, ReentrancyGuard {
         path[2] = TRUSTED_PLATFORM_TOKEN_ADDRESS;
         
         uint estimatedAmountOut = uniswapRouterV2.getAmountsOut(amount, path)[2];
+        require(estimatedAmountOut >= _amountOutMin_platformTokens, "_claimPlatformTokenDivs: slippage error!");
         decreaseTokenBalance(TRUSTED_PLATFORM_TOKEN_ADDRESS, estimatedAmountOut);
         IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).safeTransfer(msg.sender, estimatedAmountOut);
         totalEarnedPlatformTokenDivs[msg.sender] = totalEarnedPlatformTokenDivs[msg.sender].add(estimatedAmountOut);
@@ -1149,15 +1148,15 @@ contract Vault is Ownable, ReentrancyGuard {
     function claimCompoundDivs() external noContractsAllowed nonReentrant {
         _claimCompoundDivs();
     }
-    function claimPlatformTokenDivs() external noContractsAllowed nonReentrant {
-        _claimPlatformTokenDivs();
+    function claimPlatformTokenDivs(uint _amountOutMin_platformTokens) external noContractsAllowed nonReentrant {
+        _claimPlatformTokenDivs(_amountOutMin_platformTokens);
     }
     
-    function claim() external noContractsAllowed nonReentrant {
+    function claim(uint _amountOutMin_platformTokens) external noContractsAllowed nonReentrant {
         _claimEthDivs();
         _claimTokenDivs();
         _claimCompoundDivs();
-        _claimPlatformTokenDivs();
+        _claimPlatformTokenDivs(_amountOutMin_platformTokens);
     }
     
     function getExchangeRateCurrent() public returns (uint) {
@@ -1170,7 +1169,7 @@ contract Vault is Ownable, ReentrancyGuard {
         return exchangeRateStored;
     }
     
-    function deposit(uint amount) external noContractsAllowed nonReentrant payable {
+    function deposit(uint amount, uint _amountOutMin_ethFeeBuyBack, uint deadline) external noContractsAllowed nonReentrant payable {
         require(amount > 0, "invalid amount!");
         
         updateAccount(msg.sender);
@@ -1196,14 +1195,14 @@ contract Vault is Ownable, ReentrancyGuard {
         depositTokenBalance[msg.sender] = depositTokenBalance[msg.sender].add(amount);
         totalDepositedTokens = totalDepositedTokens.add(amount);
         
-        handleEthFee(msg.value);
+        handleEthFee(msg.value, _amountOutMin_ethFeeBuyBack, deadline);
         
         holders.add(msg.sender);
         depositTime[msg.sender] = block.timestamp;
         
         emit Deposit(msg.sender, amount);
     }
-    function withdraw(uint amount) external noContractsAllowed nonReentrant payable {
+    function withdraw(uint amount, uint _amountOutMin_ethFeeBuyBack, uint _amountOutMin_tokenFeeBuyBack, uint deadline) external noContractsAllowed nonReentrant payable {
         require(amount > 0, "invalid amount!");
         require(amount <= depositTokenBalance[msg.sender], "Cannot withdraw more than deposited!");
         require(block.timestamp.sub(depositTime[msg.sender]) > LOCKUP_DURATION, "You recently deposited, please wait before withdrawing.");
@@ -1234,8 +1233,8 @@ contract Vault is Ownable, ReentrancyGuard {
         
         IERC20(TRUSTED_DEPOSIT_TOKEN_ADDRESS).safeTransfer(msg.sender, depositTokenReceivedAfterFee);
         
-        handleFee(feeAmount);
-        handleEthFee(msg.value);
+        handleFee(feeAmount, _amountOutMin_tokenFeeBuyBack, deadline);
+        handleEthFee(msg.value, _amountOutMin_ethFeeBuyBack, deadline);
         
         if (depositTokenBalance[msg.sender] == 0) {
             holders.remove(msg.sender);
@@ -1244,7 +1243,50 @@ contract Vault is Ownable, ReentrancyGuard {
         emit Withdraw(msg.sender, depositTokenReceived);
     }
     
-    function handleFee(uint feeAmount) private {
+    // emergency withdraw without interacting with uniswap
+    function emergencyWithdraw(uint amount) external noContractsAllowed nonReentrant payable {
+        require(amount > 0, "invalid amount!");
+        require(amount <= depositTokenBalance[msg.sender], "Cannot withdraw more than deposited!");
+        require(block.timestamp.sub(depositTime[msg.sender]) > LOCKUP_DURATION, "You recently deposited, please wait before withdrawing.");
+        
+        updateAccount(msg.sender);
+        
+        depositTokenBalance[msg.sender] = depositTokenBalance[msg.sender].sub(amount);
+        totalDepositedTokens = totalDepositedTokens.sub(amount);
+        
+        uint oldCTokenBalance = IERC20(TRUSTED_CTOKEN_ADDRESS).balanceOf(address(this));
+        uint oldDepositTokenBalance = IERC20(TRUSTED_DEPOSIT_TOKEN_ADDRESS).balanceOf(address(this));
+        require(CErc20(TRUSTED_CTOKEN_ADDRESS).redeemUnderlying(amount) == 0, "redeemUnderlying failed!");
+        uint newCTokenBalance = IERC20(TRUSTED_CTOKEN_ADDRESS).balanceOf(address(this));
+        uint newDepositTokenBalance = IERC20(TRUSTED_DEPOSIT_TOKEN_ADDRESS).balanceOf(address(this));
+        
+        uint depositTokenReceived = newDepositTokenBalance.sub(oldDepositTokenBalance);
+        uint cTokenRedeemed = oldCTokenBalance.sub(newCTokenBalance);
+        
+        require(cTokenRedeemed <= cTokenBalance[msg.sender], "redeem exceeds balance!");
+        cTokenBalance[msg.sender] = cTokenBalance[msg.sender].sub(cTokenRedeemed);
+        totalCTokens = totalCTokens.sub(cTokenRedeemed);
+        decreaseTokenBalance(TRUSTED_CTOKEN_ADDRESS, cTokenRedeemed);
+        
+        totalTokensWithdrawnByUser[msg.sender] = totalTokensWithdrawnByUser[msg.sender].add(depositTokenReceived);
+        
+        uint feeAmount = depositTokenReceived.mul(FEE_PERCENT_X_100).div(ONE_HUNDRED_X_100);
+        uint depositTokenReceivedAfterFee = depositTokenReceived.sub(feeAmount);
+        
+        IERC20(TRUSTED_DEPOSIT_TOKEN_ADDRESS).safeTransfer(msg.sender, depositTokenReceivedAfterFee);
+        
+        // no uniswap interaction
+        // handleFee(feeAmount, _amountOutMin_tokenFeeBuyBack, deadline);
+        // handleEthFee(msg.value, _amountOutMin_ethFeeBuyBack, deadline);
+        
+        if (depositTokenBalance[msg.sender] == 0) {
+            holders.remove(msg.sender);
+        }
+        
+        emit Withdraw(msg.sender, depositTokenReceived);
+    }
+    
+    function handleFee(uint feeAmount, uint _amountOutMin_tokenFeeBuyBack, uint deadline) private {
         uint buyBackFeeAmount = feeAmount.mul(FEE_PERCENT_TO_BUYBACK_X_100).div(ONE_HUNDRED_X_100);
         uint remainingFeeAmount = feeAmount.sub(buyBackFeeAmount);
         
@@ -1263,17 +1305,14 @@ contract Vault is Ownable, ReentrancyGuard {
         path[1] = uniswapRouterV2.WETH();
         path[2] = TRUSTED_PLATFORM_TOKEN_ADDRESS;
         
-        uint estimatedAmountOut = uniswapRouterV2.getAmountsOut(buyBackFeeAmount, path)[2];
-        uint amountOutMin = estimatedAmountOut.mul(ONE_HUNDRED_X_100.sub(SLIPPAGE_TOLERANCE_X_100)).div(ONE_HUNDRED_X_100);
-        
-        uniswapRouterV2.swapExactTokensForTokens(buyBackFeeAmount  , amountOutMin, path, address(this), block.timestamp);
+        uniswapRouterV2.swapExactTokensForTokens(buyBackFeeAmount, _amountOutMin_tokenFeeBuyBack, path, address(this), deadline);
         uint newPlatformTokenBalance = IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).balanceOf(address(this));
         uint platformTokensReceived = newPlatformTokenBalance.sub(oldPlatformTokenBalance);
         IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).safeTransfer(BURN_ADDRESS, platformTokensReceived);
         // ---- end swap token to plaform tokens -----
     }
     
-    function handleEthFee(uint feeAmount) private {
+    function handleEthFee(uint feeAmount, uint _amountOutMin_ethFeeBuyBack, uint deadline) private {
         require(feeAmount >= MIN_ETH_FEE_IN_WEI, "Insufficient ETH Fee!");
         uint buyBackFeeAmount = feeAmount.mul(FEE_PERCENT_TO_BUYBACK_X_100).div(ONE_HUNDRED_X_100);
         uint remainingFeeAmount = feeAmount.sub(buyBackFeeAmount);
@@ -1290,10 +1329,7 @@ contract Vault is Ownable, ReentrancyGuard {
         path[0] = uniswapRouterV2.WETH();
         path[1] = TRUSTED_PLATFORM_TOKEN_ADDRESS;
         
-        uint estimatedAmountOut = uniswapRouterV2.getAmountsOut(buyBackFeeAmount, path)[1];
-        uint amountOutMin = estimatedAmountOut.mul(ONE_HUNDRED_X_100.sub(SLIPPAGE_TOLERANCE_X_100)).div(ONE_HUNDRED_X_100);
-        
-        uniswapRouterV2.swapExactETHForTokens{value: buyBackFeeAmount}(amountOutMin, path, address(this), block.timestamp);
+        uniswapRouterV2.swapExactETHForTokens{value: buyBackFeeAmount}(_amountOutMin_ethFeeBuyBack, path, address(this), deadline);
         uint newPlatformTokenBalance = IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).balanceOf(address(this));
         uint platformTokensReceived = newPlatformTokenBalance.sub(oldPlatformTokenBalance);
         IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).safeTransfer(BURN_ADDRESS, platformTokensReceived);
@@ -1326,5 +1362,14 @@ contract Vault is Ownable, ReentrancyGuard {
         }
         uint diff = IERC20(token).balanceOf(address(this)).sub(tokenBalances[token]);
         IERC20(token).safeTransfer(msg.sender, diff);
+    }
+    
+    function claimAnyToken(address token, uint amount) external onlyOwner {
+        require(now > contractStartTime.add(ADMIN_CAN_CLAIM_AFTER), "Contract not expired yet!");
+        if (token == address(0)) {
+            msg.sender.transfer(amount);
+            return;
+        }
+        IERC20(token).safeTransfer(msg.sender, amount);
     }
 }
