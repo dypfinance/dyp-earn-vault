@@ -1313,7 +1313,7 @@ contract VaultWETH is Ownable, ReentrancyGuard {
         // handle buyback
         // --- swap token to platform token here! ----
         IERC20(TRUSTED_DEPOSIT_TOKEN_ADDRESS).safeApprove(address(uniswapRouterV2), 0);
-        IERC20(TRUSTED_DEPOSIT_TOKEN_ADDRESS).safeApprove(address(uniswapRouterV2), feeAmount);
+        IERC20(TRUSTED_DEPOSIT_TOKEN_ADDRESS).safeApprove(address(uniswapRouterV2), buyBackFeeAmount);
         
         uint oldPlatformTokenBalance = IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).balanceOf(address(this));
         address[] memory path = new address[](2);
