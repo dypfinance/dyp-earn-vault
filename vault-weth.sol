@@ -1132,7 +1132,7 @@ contract VaultWETH is Ownable, ReentrancyGuard {
     function _claimPlatformTokenDivs(uint _amountOutMin_platformTokens) private {
         updateAccount(msg.sender);
         uint amount = platformTokenDivsBalance[msg.sender];
-        platformTokenDivsBalance[msg.sender] = 0;
+        
         if (amount == 0) return;
         
         address[] memory path = new address[](2);
@@ -1141,6 +1141,14 @@ contract VaultWETH is Ownable, ReentrancyGuard {
         
         uint estimatedAmountOut = uniswapRouterV2.getAmountsOut(amount, path)[1];
         require(estimatedAmountOut >= _amountOutMin_platformTokens, "_claimPlatformTokenDivs: slippage error!");
+        
+        if (IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).balanceOf(address(this)) < estimatedAmountOut) {
+            return;
+        }
+        
+        platformTokenDivsBalance[msg.sender] = 0;
+        
+        
         decreaseTokenBalance(TRUSTED_PLATFORM_TOKEN_ADDRESS, estimatedAmountOut);
         IERC20(TRUSTED_PLATFORM_TOKEN_ADDRESS).safeTransfer(msg.sender, estimatedAmountOut);
         totalEarnedPlatformTokenDivs[msg.sender] = totalEarnedPlatformTokenDivs[msg.sender].add(estimatedAmountOut);
